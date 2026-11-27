@@ -77,6 +77,7 @@
 #import "xenia/ui/ios/launcher/ios_game_picker_view_controller.h"
 #import "xenia/ui/ios/launcher/ios_game_tile_cell.h"
 #import "xenia/ui/ios/launcher/ios_jit_sheet_view_controller.h"
+#include "xenia/ui/ios/jit_enabler/StikJITExtensionLauncher.h"
 #import "xenia/ui/ios/launcher/ios_launcher_overlay_view.h"
 #import "xenia/ui/ios/launcher/ios_storage.h"
 #import "xenia/ui/ios/launcher/ios_system_link_view_controller.h"
@@ -327,6 +328,8 @@ struct LaunchPreparation {
 @property(nonatomic, assign) BOOL jitAcquired;
 // JIT was turned on, but its tool detached before a game could start (see XeJITUsable).
 @property(nonatomic, assign) BOOL jitTurnedOff;
+// The built-in JIT enabler is attaching to this process (see startBuiltInJITIfNeeded).
+@property(nonatomic, assign) BOOL builtInJITInProgress;
 @property(nonatomic, assign) BOOL memoryEntitlementEnabled;
 - (BOOL)hasConnectedGameplayController;
 - (BOOL)shouldBlockGameplayInput;
@@ -347,6 +350,7 @@ struct LaunchPreparation {
 - (void)launchGameAtPath:(const std::filesystem::path&)gamePath
                      displayName:(NSString*)displayName
     skipMemoryEntitlementWarning:(BOOL)skipMemoryEntitlementWarning;
+- (void)startBuiltInJITIfNeeded;
 - (BOOL)requestStikDebugJITHandoffForPendingLaunchPath:(const std::filesystem::path*)launchPath
                                      requirePreference:(BOOL)requirePreference
                           promptForAutomationOnSuccess:(BOOL)promptForAutomation;
@@ -746,8 +750,9 @@ NSString* const kZarSuggestionDismissedBytesKey = @"XeniaZarSuggestionDismissedB
   [self finishImportedGamesRefresh];
   [self refreshImportedGamesAsync];
 
-  // Start polling for JIT.
+  // Start polling for JIT, and turn it on with the built-in enabler when a pairing file is set.
   [self startJITPoll];
+  [self startBuiltInJITIfNeeded];
   [self.controllerNavigationCoordinator start];
 
   // Cold-launch "Open in XeniOS" with auto-StikDebug enabled backgrounds the
@@ -1605,6 +1610,100 @@ static bool XeJITUsable() {
     [self startJITPoll];
   }
   return YES;
+}
+
+// The adapter from IOSJitMemory's prepare function to the enabler's C entry point.
+static int XeBuiltInJITPrepare(const uint64_t* ranges, uint32_t count, int32_t pid) {
+  return armsx3_jit_enabler_prepare_ranges(ranges, count, pid, nullptr);
+}
+
+// What the user can do about a built-in JIT outcome word, or nil when there is nothing to say.
+static NSString* XeBuiltInJITFailureMessage(const char* word) {
+  const bool in_livecontainer = getenv("LC_HOME_PATH") != nullptr;
+  auto is = [word](const char* other) { return std::strcmp(word, other) == 0; };
+  if (is("pairing-absent")) {
+    return NSLocalizedString(@"Built-in JIT: import a pairing file in Settings > System > JIT.",
+                             @"Toast: built-in JIT has no pairing file");
+  }
+  if (is("connect-failed")) {
+    return NSLocalizedString(@"Built-in JIT: turn on LocalDevVPN, then restart XeniOS.",
+                             @"Toast: built-in JIT could not reach the device");
+  }
+  if (is("tunnel-failed") || is("pairing-rejected")) {
+    return NSLocalizedString(@"Built-in JIT: this device rejected the pairing file. Import a new "
+                             @"one in Settings.",
+                             @"Toast: built-in JIT pairing file rejected");
+  }
+  if (is("ddi-not-mounted")) {
+    return NSLocalizedString(@"Built-in JIT: mount the Developer Disk Image in Settings > System "
+                             @"> JIT, then restart XeniOS.",
+                             @"Toast: built-in JIT needs the developer disk image");
+  }
+  if (in_livecontainer && (is("start-failed") || is("connect-timeout") || is("interrupted"))) {
+    return NSLocalizedString(@"Built-in JIT: in LiveContainer 3.8.13 or later, turn on Helper "
+                             @"Process Support for XeniOS and open it full screen.",
+                             @"Toast: built-in JIT could not start inside LiveContainer");
+  }
+  return [NSString stringWithFormat:NSLocalizedString(@"Built-in JIT failed (%s). Use StikDebug "
+                                                      @"instead, or try again.",
+                                                      @"Toast; %s is the failure word"),
+                                    word[0] ? word : "unknown"];
+}
+
+- (void)startBuiltInJITIfNeeded {
+  static bool attempted = false;
+  if (attempted || self.builtInJITInProgress) {
+    return;
+  }
+  if (!GetUserDefaultBool(kXeniaBuiltInJITEnabledPreferenceKey, true) ||
+      !armsx3_jit_enabler_is_embedded() || XeJITUsable()) {
+    return;
+  }
+  if (getenv("LP_HOME_PATH") != nullptr) {
+    // A LiveContainer multitask window can't start the helper.
+    XELOGI("iOS: built-in JIT skipped in a LiveContainer multitask window");
+    return;
+  }
+  const int pairing = armsx3_jit_enabler_pairing_status();
+  if (pairing == ARMSX3_JIT_PAIRING_STATUS_NONE ||
+      pairing == ARMSX3_JIT_PAIRING_STATUS_OWN_INVALID) {
+    XELOGI("iOS: built-in JIT skipped (no usable pairing file)");
+    return;
+  }
+  attempted = true;
+  self.builtInJITInProgress = YES;
+  xe::cpu::backend::IOSJitMemory::SetBuiltInPrepareFunction(XeBuiltInJITPrepare);
+  XELOGI("iOS: built-in JIT: starting the JIT enabler");
+  [self showPersistentStatusToast:NSLocalizedString(@"Turning on JIT…",
+                                                    @"Toast: the built-in JIT enabler is running")
+                            style:XeniaIOSStatusToastStyleInfo];
+  // The helper stops every thread while it is attached: let the toast reach the screen first.
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                 dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                   const int code = xe::cpu::backend::IOSJitMemory::PrepareWithBuiltInHelper();
+                   armsx3_jit_enabler_result result;
+                   const bool have_result = armsx3_jit_enabler_last_result(&result) == 0;
+                   std::string word = have_result ? result.helper_outcome : "";
+                   dispatch_async(dispatch_get_main_queue(), ^{
+                     self.builtInJITInProgress = NO;
+                     [self dismissStatusToast];
+                     XELOGI("iOS: built-in JIT finished: code={} outcome='{}'", code, word);
+                     if (XeJITUsable()) {
+                       [self showStatusToast:NSLocalizedString(@"JIT enabled.",
+                                                               @"Toast: built-in JIT succeeded")
+                                       style:XeniaIOSStatusToastStyleSuccess];
+                       [self onJITAcquired];
+                       return;
+                     }
+                     [self showStatusToast:XeBuiltInJITFailureMessage(word.c_str())
+                                     style:XeniaIOSStatusToastStyleWarning];
+                     if (!self.jitPollTimer) {
+                       [self startJITPoll];
+                     }
+                     // StikDebug stays the fallback.
+                     [self evaluateAutomaticStikDebugJITHandoffIfNeeded];
+                   });
+                 });
 }
 
 - (void)startJITPoll {
@@ -3251,6 +3350,10 @@ static bool XeJITUsable() {
   }
   if (self.gameRunning || self.gameStopInProgress) {
     XELOGI("iOS: Automatic StikDebug handoff skipped (game already running)");
+    return NO;
+  }
+  if (self.builtInJITInProgress) {
+    XELOGI("iOS: StikDebug handoff skipped (built-in JIT in progress)");
     return NO;
   }
   // Don't bounce through StikDebug while a touch layout install confirm is

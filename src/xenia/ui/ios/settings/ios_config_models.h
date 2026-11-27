@@ -75,6 +75,11 @@ enum class IOSConfigAction {
   kOpenMicrophone,
   // Settings → System Software → Original Xbox Games, where the Xbox emulator is installed.
   kOpenXboxEmulator,
+  // Settings → System → Built-in JIT.
+  kImportJITPairingFile,
+  kRemoveJITPairingFile,
+  kMountDeveloperDiskImage,
+  kTestBuiltInJITSetup,
 };
 
 struct IOSConfigChoice {

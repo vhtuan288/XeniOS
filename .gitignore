@@ -119,3 +119,6 @@ CMakeUserPresets.json
 /cache0
 /devkit
 recent.toml
+
+# Prebuilt idevice-ffi for the iOS built-in JIT enabler (tools/ios/build_idevice.sh)
+/third_party/idevice-ffi/

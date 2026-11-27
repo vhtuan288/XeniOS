@@ -38,6 +38,22 @@ class IOSJitMemory {
   using ExternalPrepareHook = void (*)(bool preparing);
   static void SetExternalPrepareHook(ExternalPrepareHook hook);
 
+  // The built-in JIT enabler: an app extension that attaches a debugger to
+  // this process over the device's own loopback, writes one byte at each
+  // 16 KB page start of the given (base, size) ranges, and detaches. Returns 1
+  // when every page was prepared. Set once by the app, before the first
+  // PrepareWithBuiltInHelper.
+  using BuiltInPrepareFunction = int (*)(const uint64_t* ranges,
+                                         uint32_t count, int32_t pid);
+  static void SetBuiltInPrepareFunction(BuiltInPrepareFunction function);
+  // Turns JIT on without an external tool: with TXM this prepares the whole
+  // persistent code region, so NeedsAttachedTool() becomes false; without TXM
+  // the attach alone leaves CS_DEBUGGED set. Blocks for the whole pass and
+  // stops every thread while the helper is attached, so call it off the main
+  // thread. Returns the helper's code (1 on success), 0 when there was nothing
+  // to do or no helper is set, or -1 when the region could not be mapped.
+  static int PrepareWithBuiltInHelper();
+
   // Code is packed only in the prepared persistent mapping; elsewhere every
   // function takes its own page, so precompiling a whole executable would fill
   // the cache.

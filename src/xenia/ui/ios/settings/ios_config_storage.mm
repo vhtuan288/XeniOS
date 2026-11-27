@@ -54,6 +54,7 @@ constexpr NSTimeInterval kXeniaPendingExternalLaunchTTLSeconds = 120.0;
 }  // namespace
 
 NSString* const kXeniaAutoOpenStikDebugOnLaunchPreferenceKey = @"ios_auto_open_stikdebug_on_launch";
+NSString* const kXeniaBuiltInJITEnabledPreferenceKey = @"ios_builtin_jit_enabled";
 NSString* const kXeniaStikDebugAutomationPromptAnsweredPreferenceKey =
     @"ios_stikdebug_automation_prompt_answered";
 NSString* const kXeniaLastAutoStikDebugAttemptTimestampPreferenceKey =

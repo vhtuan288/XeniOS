@@ -26,6 +26,7 @@
 
 #import "xenia/ui/ios/app/ios_landscape_navigation_controller.h"
 #import "xenia/ui/ios/app/ios_window_layout.h"
+#import "xenia/ui/ios/jit_enabler/xe_builtin_jit_settings.h"
 #import "xenia/ui/ios/launcher/ios_compat_data.h"
 #import "xenia/ui/ios/launcher/ios_external_folders_view_controller.h"
 #import "xenia/ui/ios/settings/ios_choice_list_view_controller.h"
@@ -1830,6 +1831,24 @@ static bool IsSliderItem(const IOSConfigItem* item) {
         [self.navigationController pushViewController:folders_vc animated:YES];
         [folders_vc release];
       } break;
+      case IOSConfigAction::kImportJITPairingFile: {
+        XeniaConfigViewController* unsafe_self = self;
+        XeBuiltInJITPresentPairingImport(self, ^{
+          [unsafe_self reloadSectionsFromCatalog];
+        });
+      } break;
+      case IOSConfigAction::kRemoveJITPairingFile: {
+        XeniaConfigViewController* unsafe_self = self;
+        XeBuiltInJITConfirmRemovePairing(self, ^{
+          [unsafe_self reloadSectionsFromCatalog];
+        });
+      } break;
+      case IOSConfigAction::kMountDeveloperDiskImage:
+        XeBuiltInJITRunMountDiskImage(self);
+        break;
+      case IOSConfigAction::kTestBuiltInJITSetup:
+        XeBuiltInJITRunSetupCheck(self);
+        break;
       case IOSConfigAction::kResetGameSettings:
         [self confirmResetGameSettings];
         break;

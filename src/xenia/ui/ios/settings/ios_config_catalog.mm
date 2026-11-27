@@ -27,6 +27,8 @@
 #include "xenia/ui/config_helpers.h"
 #include "xenia/ui/ios/launcher/ios_dashboard.h"
 #include "xenia/ui/ios/launcher/ios_xefu.h"
+#include "xenia/ui/ios/jit_enabler/StikJITExtensionLauncher.h"
+#import "xenia/ui/ios/jit_enabler/xe_builtin_jit_settings.h"
 
 #import "xenia/ui/ios/settings/ios_config_storage.h"
 #import "xenia/ui/ios/shared/ios_system_link.h"
@@ -630,6 +632,37 @@ static std::vector<IOSConfigSection> BuildSystemSections() {
       "up with a pairing file.",
       false);
   PushIfNotEmpty(sections, std::move(automation));
+
+  // The JIT enabler extension turns JIT on at launch with a pairing file, without StikDebug.
+  if (XeBuiltInJITAvailable()) {
+    IOSConfigSection builtin;
+    builtin.title = "Built-in JIT";
+    builtin.footer =
+        "Needs LocalDevVPN on, a Remote Pairing file for this device and the Developer Disk "
+        "Image mounted. In LiveContainer, use 3.8.13 or later with Helper Process Support on.";
+    AddUserDefaultBoolSetting(
+        builtin.items, kXeniaBuiltInJITEnabledPreferenceKey, "Turn On JIT at Launch",
+        "Turns on JIT by itself when XeniOS starts, with the pairing file below. StikDebug "
+        "isn't needed.",
+        true);
+    const int pairing = armsx3_jit_enabler_pairing_status();
+    AddActionSetting(builtin.items, IOSConfigAction::kImportJITPairingFile,
+                     pairing == ARMSX3_JIT_PAIRING_STATUS_OWN ? "Replace Pairing File"
+                                                              : "Import Pairing File",
+                     XeBuiltInJITPairingStatusText());
+    if (pairing == ARMSX3_JIT_PAIRING_STATUS_OWN ||
+        pairing == ARMSX3_JIT_PAIRING_STATUS_OWN_INVALID) {
+      AddActionSetting(builtin.items, IOSConfigAction::kRemoveJITPairingFile,
+                       "Remove Pairing File", "");
+    }
+    AddActionSetting(builtin.items, IOSConfigAction::kMountDeveloperDiskImage,
+                     "Mount Developer Disk Image",
+                     "Downloads it the first time. Needed once after each restart of the "
+                     "device.");
+    AddActionSetting(builtin.items, IOSConfigAction::kTestBuiltInJITSetup, "Test JIT Setup",
+                     "Checks LocalDevVPN, the pairing file and the disk image.");
+    PushIfNotEmpty(sections, std::move(builtin));
+  }
 
   IOSConfigSection dashboard;
   dashboard.title = "Dashboard";

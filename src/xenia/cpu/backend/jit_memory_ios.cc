@@ -71,10 +71,13 @@ uint8_t* execute_region_reservation =
     MapBelowExecuteRegionLimit(kExecuteRegionReserveSize, PROT_NONE);
 
 std::atomic<IOSJitMemory::ExternalPrepareHook> external_prepare_hook{nullptr};
+std::atomic<IOSJitMemory::BuiltInPrepareFunction> builtin_prepare_function{
+    nullptr};
 
 // Shown when the JIT tool is gone or doesn't answer; the launcher says the same.
 constexpr char kJitTurnedOffMessage[] =
-    "JIT was turned off before the game started. Open StikDebug, enable JIT "
+    "JIT was turned off before the game started. Restart XeniOS with "
+    "LocalDevVPN on to use the built-in JIT, or open StikDebug, enable JIT "
     "for XeniOS again, and keep it connected until the game is running.";
 
 }  // namespace
@@ -103,6 +106,8 @@ struct IOSJitMemory::Impl {
     uint8_t* write_base = nullptr;
     bool initialized = false;
     bool in_use = false;
+    // The built-in helper is preparing the region with the mutex released.
+    bool builtin_pending = false;
     size_t size = 0;
   };
 
@@ -157,6 +162,12 @@ struct IOSJitMemory::Impl {
       write_base = state.write_base;
       return true;
     }
+    if (state.builtin_pending) {
+      XELOGE(
+          "iOS JIT: the built-in JIT enabler is still preparing the code "
+          "region");
+      return false;
+    }
     if (!IsDebuggerAttached()) {
       // The prepare request would trap with no one to answer it. Fail the
       // setup instead, so the launcher can say how to turn JIT back on.
@@ -178,6 +189,21 @@ struct IOSJitMemory::Impl {
       XELOGW("iOS JIT TXM: persistent external prepare request failed");
     }
 
+    if (!FinishPersistentMapping(state, execute, size)) {
+      execute_base = nullptr;
+      write_base = nullptr;
+      return false;
+    }
+    state.in_use = true;
+    execute_base = state.execute_base;
+    write_base = state.write_base;
+    return true;
+  }
+
+  // Maps the RW alias of a prepared RX region and records it as the persistent
+  // mapping, not yet in use. On failure the RX region is unmapped.
+  static bool FinishPersistentMapping(IOSPersistentGeneratedCodeMapping& state,
+                                      uint8_t* execute, size_t size) {
     vm_address_t remap_addr = 0;
     vm_prot_t cur_prot = 0;
     vm_prot_t max_prot = 0;
@@ -189,8 +215,6 @@ struct IOSJitMemory::Impl {
       XELOGW("iOS JIT persistent dual-mapping: vm_remap failed (kr={})",
              remap_result);
       munmap(execute, size);
-      execute_base = nullptr;
-      write_base = nullptr;
       return false;
     }
 
@@ -203,20 +227,16 @@ struct IOSJitMemory::Impl {
           errno, std::strerror(errno));
       vm_deallocate(mach_task_self(), remap_addr, size);
       munmap(execute, size);
-      execute_base = nullptr;
-      write_base = nullptr;
       return false;
     }
 
     state.execute_base = execute;
     state.write_base = write;
     state.initialized = true;
-    state.in_use = true;
+    state.in_use = false;
     state.size = size;
-    execute_base = execute;
-    write_base = write;
     XELOGI("iOS JIT persistent dual-mapping active: execute={:p} write={:p}",
-           static_cast<void*>(execute_base), static_cast<void*>(write_base));
+           static_cast<void*>(execute), static_cast<void*>(write));
     return true;
   }
 
@@ -746,6 +766,83 @@ bool IOSJitMemory::UsesTXMPreparation() {
 
 void IOSJitMemory::SetExternalPrepareHook(ExternalPrepareHook hook) {
   external_prepare_hook.store(hook, std::memory_order_release);
+}
+
+void IOSJitMemory::SetBuiltInPrepareFunction(BuiltInPrepareFunction function) {
+  builtin_prepare_function.store(function, std::memory_order_release);
+}
+
+int IOSJitMemory::PrepareWithBuiltInHelper() {
+  const BuiltInPrepareFunction prepare =
+      builtin_prepare_function.load(std::memory_order_acquire);
+  if (!prepare || Impl::IsDebuggerAttached()) {
+    // No helper, or a JIT tool is attached already and will answer the brk.
+    return 0;
+  }
+  constexpr size_t kHelperPageSize = 0x4000;
+  if (!Impl::IOSUseTXMBrokerPath()) {
+    // Without TXM the attach itself is what matters: it leaves CS_DEBUGGED set
+    // after the detach. One throwaway page gives the helper a valid range.
+    void* page = mmap(nullptr, kHelperPageSize, PROT_READ | PROT_EXEC,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) {
+      return -1;
+    }
+    const uint64_t range[2] = {reinterpret_cast<uint64_t>(page),
+                               kHelperPageSize};
+    const int result = prepare(range, 1, int32_t(getpid()));
+    munmap(page, kHelperPageSize);
+    XELOGI("iOS JIT: built-in JIT enabler returned {} (non-TXM)", result);
+    return result;
+  }
+
+  auto& state = Impl::IOSPersistentGeneratedCodeMappingState();
+  uint8_t* execute = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (state.initialized || state.in_use || state.builtin_pending ||
+        Impl::IOSExternalPrepareIssued().load(std::memory_order_acquire)) {
+      return 0;
+    }
+    execute = Impl::MapExecuteRegionLow(kExecuteRegionReserveSize);
+    if (!execute || execute == MAP_FAILED) {
+      XELOGW(
+          "iOS JIT: no room to map the code region for the built-in JIT "
+          "enabler");
+      return -1;
+    }
+    state.builtin_pending = true;
+  }
+
+  // The mutex is released: the helper stops this process while it writes, and
+  // the launcher's JIT poll must not wait on it.
+  const uint64_t range[2] = {reinterpret_cast<uint64_t>(execute),
+                             kExecuteRegionReserveSize};
+  const int result = prepare(range, 1, int32_t(getpid()));
+  XELOGI("iOS JIT: built-in JIT enabler returned {} for {:p}+0x{:X}", result,
+         static_cast<void*>(execute), kExecuteRegionReserveSize);
+
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.builtin_pending = false;
+  if (result != 1) {
+    // Hand the region back as the reservation, so StikDebug can still prepare
+    // it at the same low address.
+    if (reinterpret_cast<uintptr_t>(execute) + kExecuteRegionReserveSize <=
+        kExecuteRegionLimit) {
+      execute_region_reservation = execute;
+    } else {
+      munmap(execute, kExecuteRegionReserveSize);
+    }
+    return result;
+  }
+  // The helper attached, prepared and detached: no brk request may follow.
+  Impl::IOSExternalPrepareIssued().store(true, std::memory_order_release);
+  Impl::IOSExternalDetachIssued().store(true, std::memory_order_release);
+  if (!Impl::FinishPersistentMapping(state, execute,
+                                     kExecuteRegionReserveSize)) {
+    return -1;
+  }
+  return 1;
 }
 
 bool IOSJitMemory::PacksCode() { return Impl::IOSUseTXMBrokerPath(); }

@@ -121,7 +121,16 @@ for appex in "$payload_app"/Extensions/*.appex "$payload_app"/PlugIns/*.appex; d
     -c "Set :CFBundleShortVersionString $short_version" \
     -c "Set :CFBundleVersion $build_number" \
     "$appex/Info.plist"
-  codesign --force --sign - "$appex"
+  if [ "$(basename "$appex")" = "XeniOSJITEnabler.appex" ]; then
+    # The built-in JIT enabler attaches a debugger to XeniOS: keep get-task-allow.
+    jit_entitlements="$(cd "$(dirname "$0")/.." && pwd)/src/xenia/ui/ios/jit_enabler/helper/JITEnabler.entitlements"
+    codesign --force --sign - --entitlements "$jit_entitlements" "$appex"
+    if ! codesign -d --entitlements :- "$appex" 2>/dev/null | grep -q "get-task-allow"; then
+      die "XeniOSJITEnabler.appex lost get-task-allow when signed"
+    fi
+  else
+    codesign --force --sign - "$appex"
+  fi
 done
 shopt -u nullglob
 codesign --force --sign - --entitlements "$requested_entitlements" "$payload_app"

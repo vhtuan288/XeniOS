@@ -259,6 +259,19 @@ target_compile_options(xenia-ui-ios PRIVATE
   $<$<COMPILE_LANGUAGE:OBJCXX>:-Wno-nullability-completeness>
 )
 
+# The built-in JIT enabler's host side (adapted from ARMSX3, GPL-2.0-or-later):
+# it launches PlugIns/XeniOSJITEnabler.appex and talks to it over XPC. ARC, unlike
+# the rest of this target; callers use only its C functions.
+target_sources(xenia-ui-ios PRIVATE
+  jit_enabler/StikJITExtensionLauncher.h
+  jit_enabler/StikJITExtensionLauncher.m
+  jit_enabler/pairing_shape.h
+  jit_enabler/xe_builtin_jit_settings.h
+  jit_enabler/xe_builtin_jit_settings.mm
+)
+set_source_files_properties(jit_enabler/StikJITExtensionLauncher.m
+  PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+
 # StateReporting (ios_state_reporting.mm) is new in iOS 27; the app runs on 26.
 target_link_options(xenia-ui-ios PUBLIC
   "SHELL:-weak_framework StateReporting"

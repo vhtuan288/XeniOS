@@ -22,6 +22,8 @@
 #include "xenia/ui/ios/settings/ios_config_models.h"
 
 extern NSString* const kXeniaAutoOpenStikDebugOnLaunchPreferenceKey;
+// Turn JIT on at launch with the built-in JIT enabler (pairing file + LocalDevVPN). On by default.
+extern NSString* const kXeniaBuiltInJITEnabledPreferenceKey;
 // The offer to open StikDebug automatically was answered with Not Now. It is made once; the
 // setting stays in Settings > Startup and on the JIT sheet.
 extern NSString* const kXeniaStikDebugAutomationPromptAnsweredPreferenceKey;

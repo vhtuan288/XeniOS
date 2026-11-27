@@ -173,6 +173,86 @@ if(XENIA_IOS_CRASH_REPORTER AND NOT XE_IOS_SIMULATOR)
             "$<TARGET_BUNDLE_DIR:xenia-app>/Extensions/XeniOSCrashReporter.appex"
     VERBATIM)
 endif()
+# The built-in JIT enabler extension (adapted from ARMSX3): XeniOS launches it,
+# and it attaches a debugger to XeniOS over LocalDevVPN with the user's pairing
+# file to prepare the JIT region, so StikDebug isn't needed. It links the
+# prebuilt idevice-ffi from tools/ios/build_idevice.sh, and goes in PlugIns/,
+# which SideStore and LiveContainer rename along with the app.
+set(XENIA_IOS_IDEVICE_DIR "${PROJECT_SOURCE_DIR}/third_party/idevice-ffi/out"
+    CACHE PATH "Prebuilt idevice-ffi (lib/libidevice_ffi.a, include/idevice.h)")
+if(EXISTS "${XENIA_IOS_IDEVICE_DIR}/lib/libidevice_ffi.a")
+  set(_xe_builtin_jit_default ON)
+else()
+  set(_xe_builtin_jit_default OFF)
+endif()
+option(XENIA_IOS_BUILTIN_JIT "Embed the built-in JIT enabler extension"
+       ${_xe_builtin_jit_default})
+if(XENIA_IOS_BUILTIN_JIT AND NOT XE_IOS_SIMULATOR)
+  if(NOT EXISTS "${XENIA_IOS_IDEVICE_DIR}/lib/libidevice_ffi.a")
+    message(FATAL_ERROR
+      "XENIA_IOS_BUILTIN_JIT needs ${XENIA_IOS_IDEVICE_DIR}/lib/libidevice_ffi.a; "
+      "run tools/ios/build_idevice.sh or set XENIA_IOS_IDEVICE_DIR")
+  endif()
+  execute_process(COMMAND xcrun --sdk iphoneos --show-sdk-path
+    OUTPUT_VARIABLE _xe_ios_sdk OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY)
+  set(_xe_jit_src "${PROJECT_SOURCE_DIR}/src/xenia/ui/ios/jit_enabler/helper")
+  set(_xe_jit_swift
+      "${_xe_jit_src}/JITEnablerRequestHandler.swift"
+      "${_xe_jit_src}/HelperDecisions.swift"
+      "${_xe_jit_src}/DDIMount.swift"
+      "${_xe_jit_src}/BlessCommands.swift"
+      "${_xe_jit_src}/EndpointProbe.swift"
+      "${_xe_jit_src}/DeveloperDiskImageService.swift"
+      "${_xe_jit_src}/StikJITError.swift"
+      "${_xe_jit_src}/DDISession.swift"
+      "${_xe_jit_src}/SynchronousDDIDownloader.swift"
+      "${_xe_jit_src}/IdeviceFFI.swift")
+  set(_xe_jit_appex "${CMAKE_CURRENT_BINARY_DIR}/XeniOSJITEnabler.appex")
+  set(_xe_jit_main_o "${CMAKE_CURRENT_BINARY_DIR}/XeniOSJITEnabler-main.o")
+  add_custom_command(
+    OUTPUT "${_xe_jit_appex}/XeniOSJITEnabler"
+           "${_xe_jit_appex}/Info.plist"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${_xe_jit_appex}"
+    COMMAND xcrun --sdk iphoneos clang
+            -target arm64-apple-ios26.0 -isysroot "${_xe_ios_sdk}"
+            -fobjc-arc -O2 -c "${_xe_jit_src}/main.m" -o "${_xe_jit_main_o}"
+    COMMAND xcrun --sdk iphoneos swiftc
+            -target arm64-apple-ios26.0 -sdk "${_xe_ios_sdk}"
+            -swift-version 5 -O -application-extension
+            -module-name XeniOSJITEnabler
+            -I "${XENIA_IOS_IDEVICE_DIR}/include"
+            ${_xe_jit_swift} "${_xe_jit_main_o}"
+            -Xlinker -force_load
+            -Xlinker "${XENIA_IOS_IDEVICE_DIR}/lib/libidevice_ffi.a"
+            -Xlinker -application_extension
+            # main.m's NSExtensionMain wraps the system one (no Swift @main).
+            -Xlinker -e -Xlinker _NSExtensionMain
+            -Xlinker -dead_strip
+            -framework Foundation -framework Network
+            -o "${_xe_jit_appex}/XeniOSJITEnabler"
+    COMMAND plutil -convert binary1 -o "${_xe_jit_appex}/Info.plist"
+            "${_xe_jit_src}/Info.plist"
+    # get-task-allow is what lets it attach to XeniOS; packaging signs it again
+    # with the same entitlements.
+    COMMAND codesign --force --sign -
+            --entitlements "${_xe_jit_src}/JITEnabler.entitlements"
+            "${_xe_jit_appex}"
+    DEPENDS ${_xe_jit_swift} "${_xe_jit_src}/main.m"
+            "${_xe_jit_src}/Info.plist" "${_xe_jit_src}/JITEnabler.entitlements"
+            "${XENIA_IOS_IDEVICE_DIR}/lib/libidevice_ffi.a"
+    COMMENT "Building XeniOSJITEnabler.appex"
+    VERBATIM)
+  add_custom_target(xenia-ios-jit-enabler
+    DEPENDS "${_xe_jit_appex}/XeniOSJITEnabler" "${_xe_jit_appex}/Info.plist")
+  add_dependencies(xenia-app xenia-ios-jit-enabler)
+  set_property(TARGET xenia-app APPEND PROPERTY LINK_DEPENDS
+               "${_xe_jit_appex}/XeniOSJITEnabler")
+  add_custom_command(TARGET xenia-app POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${_xe_jit_appex}"
+            "$<TARGET_BUNDLE_DIR:xenia-app>/PlugIns/XeniOSJITEnabler.appex"
+    VERBATIM)
+endif()
 set(_xe_ios_package_command
   /bin/bash "${PROJECT_SOURCE_DIR}/tools/package_ios_ipa.sh"
   "$<TARGET_BUNDLE_DIR:xenia-app>"
